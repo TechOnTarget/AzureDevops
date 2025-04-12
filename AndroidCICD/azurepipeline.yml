@@ -1,0 +1,82 @@
+trigger:
+ branches:
+   include:
+     - test
+ paths:
+   exclude:
+     - azure-pipelines.yml
+
+
+pool:
+ vmImage: 'macOS-latest'
+
+
+parameters:
+ - name: ReleaseName
+   type: string
+   default: 532(15.6)
+ - name: ReleaseNotes
+   type: string 
+   default: "Andrid application Release form Azure Devops"
+
+
+stages:
+- stage: Build
+ displayName: "Build Stage"
+ jobs:
+ - job: BuildAndroidApp
+   displayName: "Build Android App"
+   steps:
+       - task: Bash@3
+         inputs:
+           targetType: 'inline'
+           script: |
+             yarn add @react-native-community/cli
+      
+       - task: Gradle@3
+         inputs:
+           gradleWrapperFile: 'android/gradlew'
+           workingDirectory: 'android'
+           tasks: 'assembleRelease'
+           publishJUnitResults: false
+           javaHomeOption: 'JDKVersion'
+           jdkVersionOption: '1.17'
+           gradleOptions: '-Xmx4096m'
+           sonarQubeRunAnalysis: false
+           spotBugsAnalysis: false
+
+
+       - task: CopyFiles@2
+         inputs:
+           contents: '**/*app-universal-release.apk'
+           targetFolder: '$(build.artifactStagingDirectory)'
+
+
+       - task: PublishBuildArtifacts@1
+         inputs:
+           artifactName: 'drop'
+           targetPath: '$(build.artifactStagingDirectory)'
+
+
+- stage: DeployToGooglePlay
+ displayName: "Deploy to Google Play"
+ dependsOn: Build
+ condition: and(succeeded(), in(variables['Build.Reason'], 'IndividualCI','Manual','BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/test'))
+ jobs:
+ - deployment: Deploy
+   displayName: "Google Play Deployment"
+   environment:
+     name: 'GooglePlay internal'
+   strategy:
+       runOnce:
+         deploy:   
+           steps:           
+           - task: GooglePlayRelease@4
+             inputs:
+               serviceConnection: 'GooglePlay'
+               applicationId: tech.on.target
+               action: 'SingleApk'
+               apkFile: '$(Pipeline.Workspace)/drop/android/app/build/outputs/apk/release/app-universal-release.apk'
+               track: 'internal'
+               changeLogFile: '${{ parameters.ReleaseNotes }}'
+               releaseName: '${{ parameters.ReleaseName }}'
