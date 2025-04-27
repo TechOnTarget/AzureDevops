@@ -1,0 +1,129 @@
+trigger:
+  branches:
+    include:
+      - code_review
+
+  paths:
+    exclude:
+      - azure-pipelines.yml
+
+pr:
+- code_review
+
+##Create a Custom build number !!
+name: $(DayOfMonth).$(Month).$(Year:yyyy)-$(BuildID)-$(SourceBranchName)
+
+variables:
+- name: AgentImage
+  value: "ubuntu-latest"
+
+
+stages:
+- stage: 'Build_Stage' 
+  displayName: 'Build' 
+  variables:
+  - group: DBCRED
+  - name: copyArtifact
+    value: '**/target/*.jar'
+  - group: SONARCREDS  
+  - name: ProjectName
+    value: tech_on_target  
+  jobs:
+  - job: 'Build_Job' 
+    displayName: 'Application Build' 
+    pool:
+      vmImage: $(AgentImage)
+    steps:
+
+    - task: Gitleaks@2
+      inputs:
+        scanlocation: '$(Build.SourcesDirectory)'
+        configtype: 'default'
+        reportformat: 'sarif'
+      displayName: "Gitleaks Scan"
+      continueOnError: true 
+   
+    - task: SonarQubePrepare@6
+      displayName: 'Configure Sonarqube'
+      inputs:
+        SonarQube: 'sonarqube'
+        scannerMode: 'Other'
+        extraProperties: |
+          # Additional properties that will be passed to the scanner,
+          # Put one key=value per line, example:
+          # sonar.exclusions=**/*.bin
+          sonar.projectKey=$(Projectkey)
+          sonar.projectName=$(ProjectName)
+          sonar.coverage.jacoco.xmlReportPaths=/home/vsts/work/1/s/**/jacoco.xml
+
+    - task: Maven@3
+      displayName: 'Maven Build'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        publishJUnitResults: false
+        codeCoverageToolOption: 'JaCoCo'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        mavenVersionOption: 'Default'
+        mavenAuthenticateFeed: false
+        effectivePomSkip: false
+        sonarQubeRunAnalysis: true
+        sqMavenPluginVersionChoice: 'latest'
+
+    - task: SonarQubePublish@6
+      displayName: 'Publish Quality Gate Report to Sonarqube'
+      inputs:
+        pollingTimeoutSec: '300'
+      
+    - task: CopyFiles@2
+      displayName: 'Copy Artifacts'
+      inputs:
+        SourceFolder: '$(Agent.BuildDirectory)'
+        Contents: '$(copyArtifact)'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'          
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact in drop'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: 'UAT' 
+  displayName: 'Deploy_in_UAT' 
+  dependsOn: ['Build_Stage']
+  condition: and(succeeded(), in(variables['Build.Reason'], 'IndividualCI','Manual','BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/uat'))
+  jobs:
+  - deployment: DeployToUAT 
+    displayName: 'Deploy to UAT environment'
+    variables:  
+      Artifact: 'drop'
+      AppType: 'apiApp'
+      WebAppName: 'uat-techontarget'
+      ResourceGroupName: 'UAT'
+      packageForLinux: '$(System.DefaultWorkingDirectory)/s/target/*.jar'
+     
+    pool:
+      vmImage: $(AgentImage) 
+    environment: 'UAT'
+    strategy:
+      runOnce:
+        deploy:
+         steps:
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download artifacts in Agent Working Dir'
+            inputs:
+              artifact:  $(Artifact)
+              path: $(System.DefaultWorkingDirectory)
+
+          - task: AzureRmWebAppDeployment@4
+            displayName: 'Azure App Service Deploy'
+            inputs:
+              ConnectionType: 'AzureRM' 
+              appType: $(AppType) 
+              azureSubscription: "SP"
+              WebAppName: $(WebAppName)
+              ResourceGroupName:  $(ResourceGroupName)
+              packageForLinux: $(packageForLinux)
+         
+           
