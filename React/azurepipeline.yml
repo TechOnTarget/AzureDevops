@@ -1,0 +1,155 @@
+trigger:
+  branches:
+    include:
+      - uat
+
+  paths:
+    exclude:
+      - azure-pipelines.yml
+
+pr:
+- uat
+
+
+variables:
+- group: SONAR_CRED
+- name: AgentImage
+  value: "ubuntu-latest"
+- name:  projectFolder
+  value: '.'
+- name: SecureFile
+  value: ".env.uat"
+
+
+stages: 
+- stage: 'Build_Stage' 
+  displayName: 'Build' 
+  jobs:
+  - job: 'Build_Job' 
+    displayName: 'Application Build' 
+    pool:
+      vmImage: $(AgentImage)
+    steps:
+    
+      - task: DownloadSecureFile@1
+        inputs:
+          secureFile: '$(SecureFile)'
+
+      - task: CopyFiles@2
+        inputs:
+          sourceFolder: '$(Agent.TempDirectory)'
+          contents: '**/$(SecureFile)'
+          targetFolder: '$(projectFolder)'
+          cleanTargetFolder: false
+
+      - task: Bash@3
+        inputs:
+          targetType: 'inline'
+          script: |
+            echo "Rename the env file"
+            mv  $(SecureFile)  .env 
+
+      - task: NodeTool@0
+        inputs:
+          versionSource: 'spec'
+          versionSpec: '16.x'
+        displayName: 'Install Node.js'
+       
+      - task: SonarQubePrepare@6
+        inputs:
+          SonarQube: 'sonarqube'
+          scannerMode: 'CLI'
+          configMode: 'manual'
+          cliProjectKey: $(DigitalAppUikey)
+          cliSources: '.'
+
+      - script: |
+          npm install 
+          npm run build
+        displayName: 'npm install and build'
+        
+      - task: SonarQubeAnalyze@6
+        inputs:
+          jdkversion: 'JAVA_HOME_17_X64'
+          
+      - task: SonarQubePublish@6
+        inputs:
+          pollingTimeoutSec: '300'  
+  
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/build'
+          Contents: '**'
+          TargetFolder: '$(Build.ArtifactStagingDirectory)'
+        displayName: 'Copy Files'
+  
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact in drop'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+
+- stage: 'UAT' 
+  displayName: 'Deploy_in_UAT' 
+  dependsOn: ['Build_Stage']
+  condition: and(succeeded(), in(variables['Build.Reason'], 'IndividualCI','Manual','BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/uat'))
+  jobs:
+  - deployment: DeployToUAT 
+    displayName: 'Deploy to UAT environment'
+    variables:  
+      Artifact: 'drop'
+      AppType: 'Web App on Windows'
+      WebApName: 'uat-ui-app'
+      ResourceGroupNam: 'UAT_rg'
+      packageForLinux: '$(System.DefaultWorkingDirectory)'
+      targetUrl: https://uat-app.techontarget.com
+    pool:
+      vmImage: $(AgentImage) 
+    environment: 'UAT Environment'
+    strategy:
+      runOnce:
+        deploy:
+         steps:
+           - task: DownloadPipelineArtifact@2
+             displayName: 'Download artifacts in Agent Working Dir'
+             inputs:
+               artifact:  $(Artifact)
+               path: $(System.DefaultWorkingDirectory)
+
+           - task: AzureRmWebAppDeployment@4
+             displayName: 'Azure App Service Deploy'
+             inputs:
+               ConnectionType: 'AzureRM' 
+               appType: $(AppType) 
+               azureSubscription: "SP"
+               WebAppName: $(WebAppName)
+               ResourceGroupName:  $(ResourceGroupName)
+               packageForLinux: $(packageForLinux) 
+
+
+
+           - task: DockerInstaller@0
+             inputs:
+              dockerVersion: '17.09.0-ce'
+
+           - task: Bash@3
+             inputs:
+               targetType: 'inline'
+               script: |
+                chmod -R 777  ./
+                docker run --rm -v $(pwd):/zap/wrk ghcr.io/zaproxy/zaproxy:latest zap-baseline.py -t "${{ parameters.TargetUrl }}" -r report.html
+                true
+             displayName: Owasp Zap Scan
+
+           - task: CopyFiles@2
+             inputs:
+              SourceFolder: '$(agent.builddirectory)/s'
+              Contents: '**report.html'
+              TargetFolder: '$(build.artifactstagingdirectory)'
+
+           - task: PublishBuildArtifacts@1
+             inputs:
+               PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+               ArtifactName: 'DAST Reports'
+               publishLocation: 'Container'
