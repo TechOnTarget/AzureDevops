@@ -1,8 +1,8 @@
 trigger:
-- code_review
+- uat
 
 pr:
-- code_review
+- uat
 
 
 variables:
