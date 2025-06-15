@@ -1,0 +1,124 @@
+trigger:
+- uat
+
+pr:
+- uat
+
+variables:
+  - name: AgentImage
+    value: "ubuntu-latest"
+  - group: SONARCRED
+
+
+stages:
+- stage: 'Build_Stage' 
+  displayName: 'Build' 
+  jobs:
+  - job: 'Build_Job' 
+    displayName: 'Application Build' 
+    pool:
+      vmImage: $(AgentImage)
+    steps:   
+
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '16.16.0'
+        displayName: 'Install Node.js'
+
+      - script: |
+          npm install -g @angular/cli@12.1.1
+          npm install --force
+        displayName: 'npm install'
+        workingDirectory: '$(Build.SourcesDirectory)'
+        
+      - task: SonarQubePrepare@6
+        inputs:
+          SonarQube: 'sonarqube'
+          scannerMode: 'CLI'
+          configMode: 'manual'
+          cliProjectKey: $(ProjectKey)
+          cliSources: '.'
+
+      - script: |
+          if [ "$(Env)" = "Prod" ]; then
+            echo "Run in Production"
+            ng build --prod
+          elif [ "$(Env)" = "Stage" ]; then
+            echo "Run in Stage"
+            ng build --configuration=staging
+          else
+            echo "Run in UAT"
+            export NODE_OPTIONS="--max_old_space_size=8048"
+            ng build
+          fi
+        displayName: 'npm build'
+        workingDirectory: '$(Build.SourcesDirectory)'
+
+      - task: SonarQubeAnalyze@6
+        inputs:
+          jdkversion: 'JAVA_HOME_17_X64'
+
+      - task: SonarQubePublish@6
+        inputs:
+          pollingTimeoutSec: '300'
+
+      - task: CopyFiles@2
+        inputs:
+          SourceFolder: '$(Build.SourcesDirectory)/dist/appui'
+          Contents: '**'
+          TargetFolder: '$(Build.BinariesDirectory)'
+        displayName: 'Copy Artiifact'
+
+      - task: ArchiveFiles@2
+        inputs:
+          rootFolderOrFile: '$(Build.BinariesDirectory)'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+          replaceExistingArchive: true
+        displayName: 'Archive artiifacts into zip'
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact in drop'
+        inputs:
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+          ArtifactName: 'drop'
+          publishLocation: 'Container'
+
+      
+- stage: 'UAT' 
+  displayName: 'Deploy_in_UAT' 
+  dependsOn: ['Build_Stage']
+  condition: and(succeeded(), in(variables['Build.Reason'], 'IndividualCI','Manual','BatchedCI'), eq(variables['Build.SourceBranch'], 'refs/heads/uat'))
+  jobs:
+  - deployment: DeployToUAT 
+    displayName: 'Deploy to UAT environment' 
+    variables:  
+      Artifact: 'drop'
+      AppType: 'Web App on Windows'
+      WebAppName: 'uat-1'
+      ResourceGroupName: 'uat_rg'
+      packageForLinux: '$(System.DefaultWorkingDirectory)/$(Build.BuildId).zip'
+    
+    pool:
+      vmImage: $(AgentImage) 
+    environment: 'UAT Environemt'
+    strategy:
+      runOnce:
+        deploy:
+         steps:           
+            - task: DownloadPipelineArtifact@2
+              displayName: 'Download artifacts in Agent Working Dir'
+              inputs:
+                artifact: $(artifact) 
+                path: $(System.DefaultWorkingDirectory)
+
+            - task: AzureRmWebAppDeployment@4
+              displayName: 'Azure App Service Deploy'
+              inputs:
+                ConnectionType: 'AzureRM' 
+                appType: $(appType
+                azureSubscription: $(Subscription)
+                WebAppName: $(appName)
+                ResourceGroupName: $(resourceGroup)
+                packageForLinux: $(deployPackage)
